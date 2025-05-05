@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plugin-atropos"
+version = "0.0.1"
+description = "Axolotl Plugin integrating Nous Research's Atropos for RL"
+authors = [{ name="Wing Lian" }]
+readme = "README.md"
+license = {file = "LICENSE"}
+classifiers = [
+    "Programming Language :: Python :: 3"
+]
+dependencies = [
+    "torch==2.6.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
