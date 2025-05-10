@@ -30,6 +30,7 @@ def atropos_reward_placeholder(*args, **kwargs):
     return 0.0
 
 class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
+
     def __init__(
             self,
             model: Union[str, PreTrainedModel],
@@ -331,6 +332,8 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
                 else:
                     self.reward_funcs[i] = self.accelerator.prepare_model(reward_func, evaluation_mode=True)
 
+        self._last_loaded_step = 0  # no need to reload model weights again before training
+
     def get_train_dataloader(self):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
@@ -367,6 +370,7 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
             if self.state.global_step != self._last_loaded_step:
                 LOG.info(f"Loading model weights to vLLM for step {self.state.global_step}")
                 self._move_model_to_vllm()
+                LOG.info(f"Model weights loaded to vLLM for step {self.state.global_step}")
                 self._last_loaded_step = self.state.global_step
 
         # Consolidate inputs into single tensors

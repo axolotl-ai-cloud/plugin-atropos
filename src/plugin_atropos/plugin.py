@@ -43,10 +43,10 @@ class AtroposPlugin(BasePlugin):
         }
         # print(register_data)
         try:
-            requests.post(
+            data = requests.post(
                 f"{atropos_server_host}:{cfg.atropos_server_port}/register",
                 json=register_data,
                 timeout=10,
-            )
+            ).json()
         except requests.exceptions.RequestException as e:
             print(f"Error registering trainer with server: {e}")

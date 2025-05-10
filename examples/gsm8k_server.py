@@ -296,7 +296,7 @@ class GSM8kEnv(BaseEnv):
             use_wandb=True,
             rollout_server_url="http://localhost:8000",
             total_steps=1000,
-            batch_size=12,
+            batch_size=1,
             steps_per_eval=100,
             max_token_length=2048,
             wandb_name="gsm8k",

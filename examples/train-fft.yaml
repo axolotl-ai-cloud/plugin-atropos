@@ -1,0 +1,50 @@
+base_model: Qwen/Qwen3-4B
+
+torch_compile: true
+rl: grpo
+learning_rate: 1e-5
+optimizer: adamw_torch_fused
+vllm:
+  host: "0.0.0.0"
+  port: 9001  # Atropos is hardcoded to connect to vllm/openai-server on port 9001
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.9
+  enable_prefix_caching: true
+  max_model_len: 4096
+trl:
+  beta: 0.001
+  num_generations: 8
+  max_completion_length: 2048
+  use_liger_loss: true
+  use_vllm: true
+  vllm_server_port: 9001
+
+accelerator_config:
+  dispatch_batches: true
+
+output_dir: /workspace/data/axolotl-artifacts/atropos-example
+micro_batch_size: 8
+gradient_accumulation_steps: 1
+gradient_checkpointing: "offload"
+#gradient_checkpointing_kwargs:
+#  use_reentrant: false
+sequence_len: 4096
+flash_attention: true
+datasets:
+  - type: atropos
+    path: placeholder
+plugins:
+  - "axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin"
+  - "plugin_atropos.AtroposPlugin"
+
+logging_steps: 1
+warmup_steps: 5
+max_steps: 10
+save_steps: 5
+
+wandb_project: atropos-plugin-example
+
+bf16: true
+tf32: true
+
+gc_steps: 1
