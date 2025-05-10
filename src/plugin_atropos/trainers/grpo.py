@@ -1,10 +1,11 @@
 import logging
 from collections import defaultdict, deque
-from typing import Union, Any, Optional
+from contextlib import nullcontext, contextmanager
+from typing import Union, Any, Optional, Generator
 
 import datasets
 import torch
-from accelerate.utils import is_peft_model, set_seed
+from accelerate.utils import is_peft_model, set_seed, is_peft_available
 from axolotl.core.trainers.mixins import SchedulerMixin
 from datasets import Dataset, IterableDataset
 from peft import get_peft_model
@@ -15,6 +16,7 @@ from transformers import is_datasets_available, PreTrainedModel, PreTrainedToken
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.trainer_utils import seed_worker
 from trl import GRPOConfig, create_reference_model, SyncRefModelCallback
+from trl.extras.profiling import profiling_decorator
 from trl.extras.vllm_client import VLLMClient
 from trl.import_utils import is_liger_kernel_available, is_vllm_available
 from trl.models import prepare_deepspeed
@@ -192,8 +194,6 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
                 raise ImportError(
                     "Liger is required to use `liger_loss` as the GRPO loss. Run `pip install liger-kernel`."
                 )
-            if is_peft_model(model):
-                raise TypeError("Liger loss is not supported with a PEFT model.")
 
             if self.loss_type != "bnpo":
                 raise ValueError(
@@ -206,7 +206,7 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
                 epsilon_low=self.epsilon_low,
                 epsilon_high=self.epsilon_high,
                 temperature=self.temperature,
-                use_ref_model=self.ref_model is not None,
+                use_ref_model=self.beta != 0.0,
             )
 
         super(GRPOTrainer, self).__init__(
@@ -406,18 +406,6 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
             else:
                 old_per_token_logps = None
 
-            if self.beta == 0.0:
-                ref_per_token_logps = None
-            elif self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model, prompt_completion_ids, attention_mask, logits_to_keep, batch_size
-                )
-            else:
-                with self.accelerator.unwrap_model(self.model).disable_adapter():
-                    ref_per_token_logps = self._get_per_token_logps(
-                        self.model, prompt_completion_ids, attention_mask, logits_to_keep, batch_size
-                    )
-
         return {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
@@ -425,7 +413,6 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
             "completion_mask": completion_mask,
             "advantages": advantages,
             "old_per_token_logps": old_per_token_logps,
-            "ref_per_token_logps": ref_per_token_logps,
         }
 
     def _prepare_inputs(
@@ -476,3 +463,124 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
     def _get_train_sampler(self) -> Sampler:
         # just return a SequentialSampler
         return torch.utils.data.SequentialSampler(self.train_dataset)
+
+    def _compute_loss(self, model, inputs):
+        prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
+        completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
+        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
+
+        with torch.no_grad():
+            if self.ref_model is not None:
+                ref_per_token_logps = self._get_per_token_logps(
+                    self.ref_model, input_ids, attention_mask, logits_to_keep
+                )
+            else:
+                with self.accelerator.unwrap_model(self.model).disable_adapter():
+                    ref_per_token_logps = self._get_per_token_logps(
+                        self.model, input_ids, attention_mask, logits_to_keep
+                    )
+            inputs["ref_per_token_logps"] = ref_per_token_logps
+        super()._compute_loss(model, inputs)
+
+    @profiling_decorator
+    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep=None):
+        # unwrap the model to access the model.model
+        unwrapped_model = self.accelerator.unwrap_model(model)
+        if is_peft_model(unwrapped_model):
+            unwrapped_model = unwrapped_model.base_model.model
+        last_hidden_state = unwrapped_model.model(
+            input_ids=input_ids, attention_mask=attention_mask
+        ).last_hidden_state[:, :-1, :]  # (B, L-1, H)
+        if logits_to_keep is not None:
+            last_hidden_state = last_hidden_state[:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
+        return last_hidden_state
+
+    @contextmanager
+    def _get_ref_model_outputs_for_liger_loss(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            logits_to_keep: int,
+    ) -> Generator[Any, Any, Any]:
+        """
+        Get the outputs of the reference model for the Liger loss.
+        Args:
+            input_ids: The input ids of the reference model.
+            attention_mask: The attention mask of the reference model.
+            logits_to_keep: The number of logits to keep.
+        Yields:
+            `tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]`:
+                The outputs of the reference model.
+                The tuple contains the following elements:
+                - `ref_hidden_states`: The hidden states of the reference model.
+                - `ref_lm_head_weight`: The weight of the reference model's language model head.
+                - `ref_lm_head_bias`: The bias of the reference model's language model head.
+        """
+        if self.beta == 0.0:
+            yield None, None, None
+            return
+
+        if self.ref_model is not None:
+            ref_model = self.ref_model
+            ctx_manager = nullcontext()
+        else:
+            ref_model = self.model
+            ctx_manager = self.accelerator.unwrap_model(ref_model).disable_adapter()
+
+        with ctx_manager, torch.no_grad():
+            ref_last_hidden_state = self._get_last_hidden_state(ref_model, input_ids, attention_mask, logits_to_keep)
+        if is_peft_available():
+            from peft.tuners.tuners_utils import BaseTunerLayer
+        try:
+            ref_lm_head = ref_model.get_output_embeddings()
+            if is_peft_available() and isinstance(ref_lm_head, BaseTunerLayer):
+                ref_lm_head.merge()
+
+            yield (
+                ref_last_hidden_state,
+                ref_lm_head.weight,
+                ref_lm_head.bias if hasattr(ref_lm_head, "bias") else None,
+            )
+        finally:
+            if is_peft_available() and isinstance(ref_lm_head, BaseTunerLayer):
+                ref_lm_head.unmerge()
+
+    def compute_liger_loss(self, model, inputs):
+        # Compute the per-token log probabilities for the model
+        prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
+        completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
+        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
+        # get the last hidden state of the model
+        last_hidden_state = self._get_last_hidden_state(model, input_ids, attention_mask, logits_to_keep)
+        unwrapped_model = self.accelerator.unwrap_model(model)
+
+        with self._get_ref_model_outputs_for_liger_loss(input_ids, attention_mask, logits_to_keep) as (
+                ref_model_last_hidden_state,
+                ref_model_lm_head_weight,
+                ref_model_lm_head_bias,
+        ):
+            loss, metrics = self.liger_grpo_loss(
+                _input=last_hidden_state,
+                lin_weight=unwrapped_model.lm_head.weight,
+                selected_token_ids=completion_ids,
+                attention_mask=completion_mask,
+                advantages=inputs["advantages"],
+                bias=unwrapped_model.lm_head.bias,
+                old_per_token_logps=inputs["old_per_token_logps"],
+                ref_input=ref_model_last_hidden_state,
+                ref_weight=ref_model_lm_head_weight,
+                ref_bias=ref_model_lm_head_bias,
+            )
+        # Extract metrics from the liger_grpo_loss output
+        # KL divergence is the first metric when beta is non-zero
+        mean_kl = metrics[0] if self.beta != 0.0 else None
+        clip_ratio = metrics[-1]
+        mode = "train" if self.model.training else "eval"
+        if self.beta != 0.0:
+            self._metrics[mode]["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
+        self._metrics[mode]["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
+        return loss
