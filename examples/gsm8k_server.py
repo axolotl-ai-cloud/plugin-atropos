@@ -51,6 +51,7 @@ class TrlVllmServer:
         self.initialized = False
         self.session = requests.Session()
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        self.last_healthy = -1
 
     async def update_weight(self, weight: float) -> None:
         # need to update sems
@@ -59,16 +60,18 @@ class TrlVllmServer:
 
     async def check_server_status_task(self):
         self.server_healthy=True
-        # while True:
-        #     try:
-        #         await requests.get(self.config.base_url + "/health", timeout=self.config.timeout)
-        #         self.server_healthy = True
-        #     except (
-        #             aiohttp.ClientError,
-        #             Exception,
-        #     ):
-        #         self.server_healthy = False
-        #     await asyncio.sleep(1)
+        # if not self.server_healthy or time.time() - self.last_healthy > 10:
+        #     while True:
+        #         try:
+        #             await requests.get(self.config.base_url + "/health/", timeout=self.config.timeout)
+        #             self.server_healthy = True
+        #             self.last_healthy = time.time()
+        #             break
+        #         except (
+        #                 aiohttp.ClientError,
+        #                 Exception,
+        #         ):
+        #             self.server_healthy = False
 
     async def wandb_metrics(
             self, metrics_dict: Optional[dict], server_name: Optional[str]

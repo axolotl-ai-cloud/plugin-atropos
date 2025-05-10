@@ -1,6 +1,6 @@
 base_model: Qwen/Qwen3-4B
 
-torch_compile: true
+# torch_compile: true
 rl: grpo
 learning_rate: 1e-4
 adapter: lora
@@ -16,7 +16,6 @@ lora_qkv_kernel: true
 lora_o_kernel: true
 lora_mlp_kernel: true
 
-gradient_checkpointing: true
 optimizer: adamw_torch_fused
 vllm:
   host: "0.0.0.0"

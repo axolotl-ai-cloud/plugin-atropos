@@ -416,8 +416,9 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
         }
 
     def _prepare_inputs(
-        self, accumulated_local_batch: dict[str, Union[torch.Tensor, Any]]
+        self, accumulated_local_batch: list[dict[str, Union[torch.Tensor, Any]]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
+        # print(f"Accumulated local batch: {accumulated_local_batch}")
         return self._generate_and_score_completions(accumulated_local_batch)
         # return accumulated_local_batch[0]
 
@@ -445,7 +446,7 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
             data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
 
         dataloader_params = {
-            "batch_size": (self._train_batch_size // self.num_generations) * self.args.gradient_accumulation_steps,  # < this is the change
+            "batch_size": (self._train_batch_size // self.num_generations),
             "collate_fn": data_collator,
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,

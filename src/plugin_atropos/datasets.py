@@ -1,17 +1,12 @@
-import json
 import math
 import queue
-import random
 import threading
 import time
-import uuid
-from collections import defaultdict
 from functools import partial
 from typing import List, Tuple, Callable, Optional, Iterator
 
 import numpy as np
 import torch
-from axolotl.utils.distributed import is_local_main_process
 from datasets import IterableDataset
 import requests
 from datasets.iterable_dataset import ExamplesIterable
@@ -71,6 +66,8 @@ class RemoteDataProvider:
                         data = self.api_fetch_func()
 
                         for batch in data:
+                            # print("batch: ")
+                            # print(batch)
                             for prompt_ids, prompt_mask, completion_ids, completion_mask, advantages in zip(batch[0], batch[1], batch[2], batch[3], batch[4]):
                             #     sample_id = torch.Tensor([uuid.uuid4().int])
                             #     for input_id, label, score in zip(input_ids, labels, scores):
@@ -78,6 +75,7 @@ class RemoteDataProvider:
                             #         self.data_queue.put(row, timeout=self.worker_timeout)
 
                                 row = {"prompt_ids": prompt_ids, "prompt_mask": prompt_mask, "completion_ids": completion_ids, "completion_mask": completion_mask, "advantages": advantages}
+                                # print("row: ")
                                 # print(row)
                                 self.data_queue.put(row, timeout=self.worker_timeout)
 
