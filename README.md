@@ -27,7 +27,7 @@ Note: requires 3 GPUs: 0,1 runs vllm, 2 runs trainer
 
 ```bash
 # start the vLLM server (can take a few minutes), this will block the session
-CUDA_VISIBLE_DEVICES=0,1 axolotl vllm-serve examples/train-lora.yaml
+CUDA_VISIBLE_DEVICES=0,1 axolotl vllm-serve examples/train-fft.yaml --serve-module plugin_atropos.vllm_serve
 #  CUDA_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen3-4B --port 9001 --host 0.0.0.0 --tensor-parallel-size=2 --max-model-len 4096 --kv-cache-dtype fp8
 
 # in a new terminal session
@@ -39,5 +39,5 @@ python examples/gsm8k_server.py serve --slurm false
 
 Start the trainer
 ```bash
-CUDA_VISIBLE_DEVICES=2 axolotl train examples/train-lora.yaml
+CUDA_VISIBLE_DEVICES=2 axolotl train examples/train-fft.yaml
 ```

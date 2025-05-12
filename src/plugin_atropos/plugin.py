@@ -33,8 +33,8 @@ class AtroposPlugin(BasePlugin):
         register_data = {
             "wandb_group": cfg.wandb_run_group or 'default',
             "wandb_project": cfg.wandb_project,
-            # "batch_size": cfg.micro_batch_size * cfg.gradient_accumulation_steps * cfg.trl.num_generations,
-            "batch_size": cfg.trl.num_generations,
+            "batch_size": cfg.gradient_accumulation_steps * cfg.trl.num_generations * cfg.world_size,
+            # "batch_size": cfg.trl.num_generations,
             "max_token_len": cfg.sequence_len,
             "starting_step": cfg.atropos_starting_step,
             "checkpoint_dir": cfg.output_dir,

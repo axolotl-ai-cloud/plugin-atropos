@@ -49,7 +49,6 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
     ):
         if not reward_funcs:
             reward_funcs = [atropos_reward_placeholder]
-        kwargs["reward_funcs"] = reward_funcs
 
         # Args
         if args is None:
