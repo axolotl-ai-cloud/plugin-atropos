@@ -6,18 +6,22 @@ A plugin to train LLMs using [Axolotl](https://github.com/axolotl-ai-cloud/axolo
 
 Install axolotl + vllm if not already installed
 ```bash
-pip install axolotl[vllm]
+pip install axolotl[vllm,flash-attn]
 ```
 
+Install Atropos
 ```bash
 git clone https://github.com/NousResearch/atropos.git
 cd atropos
+git checkout add-support-for-custom-api-servers
 pip install -e .
 cd -
 ```
 
 Install this plugin
 ```bash
+git clone https://github.com/axolotl-ai-cloud/plugin-atropos.git
+cd plugin-atropos
 pip install -e .
 ```
 
