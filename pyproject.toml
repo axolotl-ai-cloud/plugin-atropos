@@ -3,8 +3,8 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "plugin-atropos"
-version = "0.0.1"
+name = "axolotl-plugin-atropos"
+version = "0.0.2"
 description = "Axolotl Plugin integrating Nous Research's Atropos for RL"
 authors = [{ name="Wing Lian" }]
 readme = "README.md"
@@ -14,7 +14,7 @@ classifiers = [
 ]
 dependencies = [
     "torch==2.6.0",
-    "axolotl>=0.9.0",
+    "axolotl>=0.9.2",
     "requests",
     "trl==0.17.0",
     "vllm==0.8.5.post1"

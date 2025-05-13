@@ -40,7 +40,7 @@ jobs:
     needs: [setup_release]
     environment:
       name: pypi
-      url: https://pypi.org/p/axolotl-plugin-atropos
+      url: https://pypi.org/p/plugin-atropos
     permissions:
       id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
     steps:
