@@ -6,251 +6,14 @@ from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
 from tqdm.asyncio import tqdm_asyncio
 
-from atroposlib.envs.base import BaseEnv, BaseEnvConfig, ScoredDataGroup
+from atroposlib.envs.base import (
+    APIServerConfig,
+    BaseEnv,
+    BaseEnvConfig,
+    ScoredDataGroup,
+)
 from atroposlib.type_definitions import Item, number
 from atroposlib.utils.tokenize_for_trainer import tokenize_for_trainer
-from atroposlib.envs.server_handling.server_baseline import APIServerConfig
-import asyncio
-import collections
-import time
-from asyncio import exceptions
-from typing import Optional
-import uuid
-
-import aiohttp
-import numpy as np
-import openai
-import requests
-from openai.types.chat.chat_completion import ChatCompletion, ChatCompletionMessage, Choice
-from openai.types.completion import Completion
-from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_random_exponential
-from atroposlib.envs.server_handling.server_baseline import APIServerConfig
-from atroposlib.envs.server_handling.openai_server import AsyncSemWithAdaptiveWeight
-from transformers import AutoTokenizer
-
-
-class TrlVllmServer:
-    def __init__(self, config: APIServerConfig):
-        self.config = config
-        base_url = config.base_url
-        self.openai = openai.AsyncClient(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            timeout=config.timeout,
-        )
-        self.sem = AsyncSemWithAdaptiveWeight(config.num_max_requests_at_once)
-        self.eval_sem = AsyncSemWithAdaptiveWeight(config.num_requests_for_eval)
-        self.server_healthy = True
-        self.attempts_list = []
-        self.request_timings = []
-        # in case eval is much different, we should keep different buffers
-        self.eval_attempts_list = []
-        self.eval_request_timings = []
-        self.check_task = None
-        self.initialized = False
-        self.session = requests.Session()
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-        self.last_healthy = -1
-
-    async def update_weight(self, weight: float) -> None:
-        # need to update sems
-        self.sem.update_weight(weight)
-        self.eval_sem.update_weight(weight)
-
-    async def check_server_status_task(self):
-        self.server_healthy=True
-        # if not self.server_healthy or time.time() - self.last_healthy > 10:
-        #     while True:
-        #         try:
-        #             await requests.get(self.config.base_url + "/health/", timeout=self.config.timeout)
-        #             self.server_healthy = True
-        #             self.last_healthy = time.time()
-        #             break
-        #         except (
-        #                 aiohttp.ClientError,
-        #                 Exception,
-        #         ):
-        #             self.server_healthy = False
-
-    async def wandb_metrics(
-            self, metrics_dict: Optional[dict], server_name: Optional[str]
-    ):
-        if server_name is None:
-            server_name = "server"
-        if len(self.request_timings) > 0:
-            metrics_dict[f"server/{server_name}_request_time_avg"] = np.mean(
-                self.request_timings
-            )
-            metrics_dict[f"server/{server_name}_request_time_std"] = np.std(
-                self.request_timings
-            )
-            metrics_dict[f"server/{server_name}_request_time_99p"] = np.percentile(
-                self.request_timings, 99
-            )
-        if len(self.eval_request_timings) > 0:
-            metrics_dict[f"server/{server_name}_eval_request_time_avg"] = np.mean(
-                self.eval_request_timings
-            )
-            metrics_dict[f"server/{server_name}_eval_request_time_std"] = np.std(
-                self.eval_request_timings
-            )
-            metrics_dict[f"server/{server_name}_eval_request_time_99p"] = np.percentile(
-                self.eval_request_timings, 99
-            )
-        if len(self.attempts_list) > 0:
-            metrics_dict[f"server/{server_name}_average_num_attempts"] = np.mean(
-                self.attempts_list
-            )
-        if len(self.eval_attempts_list) > 0:
-            metrics_dict[f"server/{server_name}_eval_retry_rate"] = np.mean(
-                self.eval_attempts_list
-            )
-        return metrics_dict
-
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_random_exponential(multiplier=1, max=10)
-    )
-    async def _chat_comp(self, stat_dict, **kwargs) -> ChatCompletion:
-        while not self.server_healthy:
-            await asyncio.sleep(1)
-        async with self.sem:
-            print(kwargs)
-            if stat_dict.get("start", None) is None:
-                stat_dict["start"] = time.time()
-            stat_dict["attempts"] += 1
-            url = f"{self.config.base_url}/generate/"
-            prompt = kwargs.get("messages", [])
-            prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
-            completions = self.session.post(
-                url,
-                json={
-                    "prompts": [prompt],
-                    "n": kwargs.get("n", 1),
-                    "repetition_penalty": 1.0,
-                    "temperature": 1.0,
-                    "top_p": 0.95,
-                    "top_k": -1,
-                    "min_p": 0.0,
-                    "max_tokens": kwargs.get("max_tokens", 1024),
-                },
-            )
-            completions = completions.json()
-            completions = ChatCompletion(
-                id=str(uuid.uuid4()),
-                object="chat.completion",
-                created=int(time.time()),
-                model=self.config.model_name,
-                choices=[
-                    Choice(
-                        finish_reason=(
-                            "stop" if self.tokenizer.eos_token_id in completion else "length"
-                        ),
-                        index=i,
-                        message=ChatCompletionMessage(
-                            content=self.tokenizer.decode(completion),
-                            role="assistant",
-                        ),
-                    ) for i, completion in enumerate(completions['completion_ids'])
-                ]
-            )
-
-
-            stat_dict["end"] = time.time()
-            return completions
-
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_random_exponential(multiplier=1, max=10)
-    )
-    async def _chat_eval(self, stat_dict, **kwargs) -> ChatCompletion:
-        while not self.server_healthy:
-            await asyncio.sleep(1)
-        async with self.eval_sem:
-            if stat_dict.get("start", None) is None:
-                stat_dict["start"] = time.time()
-            stat_dict["attempts"] += 1
-            completions = await self.openai.chat.completions.create(**kwargs)
-            stat_dict["end"] = time.time()
-            return completions
-
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_random_exponential(multiplier=1, max=10)
-    )
-    async def chat_completion(self, **kwargs) -> ChatCompletion:
-        if not self.initialized:
-            if (
-                    self.config.base_url is not None
-            ):  # skip health check if using OpenAI API
-                self.check_task = asyncio.create_task(self.check_server_status_task())
-            else:
-                self.server_healthy = True
-            self.initialized = True
-        kwargs["model"] = self.config.model_name
-        split = kwargs.pop("split", "train")
-        stat_dict = {}
-        stat_dict["attempts"] = 0
-        if split == "train":
-            ret_data = await self._chat_comp(stat_dict, **kwargs)
-            self.request_timings.append(stat_dict["end"] - stat_dict["start"])
-            self.attempts_list.append(stat_dict["attempts"])
-        else:
-            # Give separate eval workers, if desired, gotta go fast for those evals
-            ret_data = await self._chat_eval(stat_dict, **kwargs)
-            self.eval_request_timings.append(stat_dict["end"] - stat_dict["start"])
-            self.eval_attempts_list.append(stat_dict["attempts"])
-        return ret_data
-
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_random_exponential(multiplier=1, max=10)
-    )
-    async def _comp(self, stat_dict, **kwargs) -> Completion:
-        while not self.server_healthy:
-            await asyncio.sleep(1)
-        async with self.sem:
-            if stat_dict.get("start", None) is None:
-                stat_dict["start"] = time.time()
-            stat_dict["attempts"] += 1
-            completions = await self.openai.completions.create(**kwargs)
-            stat_dict["end"] = time.time()
-            return completions
-
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_random_exponential(multiplier=1, max=10)
-    )
-    async def _comp_eval(self, stat_dict, **kwargs) -> Completion:
-        while not self.server_healthy:
-            await asyncio.sleep(1)
-        async with self.eval_sem:
-            if stat_dict.get("start", None) is None:
-                stat_dict["start"] = time.time()
-            stat_dict["attempts"] += 1
-            completions = await self.openai.completions.create(**kwargs)
-            stat_dict["end"] = time.time()
-            return completions
-
-    async def completion(self, **kwargs) -> Completion:
-        if not self.initialized:
-            if (
-                    self.config.base_url is not None
-            ):  # skip health check if using OpenAI API
-                self.check_task = asyncio.create_task(self.check_server_status_task())
-            else:
-                self.server_healthy = True
-            self.initialized = True
-        kwargs["model"] = self.config.model_name
-        split = kwargs.pop("split", "train")
-        stat_dict = {}
-        stat_dict["attempts"] = 0
-        if split == "train":
-            ret_data = await self._comp(stat_dict, **kwargs)
-            self.request_timings.append(stat_dict["end"] - stat_dict["start"])
-            self.attempts_list.append(stat_dict["attempts"])
-        else:
-            # Give separate eval workers, if desired, gotta go fast for those evals
-            ret_data = await self._comp_eval(stat_dict, **kwargs)
-            self.eval_request_timings.append(stat_dict["end"] - stat_dict["start"])
-            self.eval_attempts_list.append(stat_dict["attempts"])
-        return ret_data
 
 system_prompt = (
     "You are a deep thinking AI, you may use extremely long chains of thought "
@@ -261,6 +24,7 @@ system_prompt = (
 )
 
 system_prompt += """You are allocated a maximum of 2048 tokens, please strive to use less.
+
 You will then provide your answer like this: \\boxed{your answer here}
 It is important that you provide your answer in the correct format.
 If you do not, you will not receive credit for your answer.
@@ -282,9 +46,8 @@ class GSM8kEnv(BaseEnv):
             server_configs: List[APIServerConfig],
             slurm=False,
             testing=False,
-            server_class=None,
     ):
-        super().__init__(config, server_configs, slurm, testing, server_class)
+        super().__init__(config, server_configs, slurm, testing)
         self.percent_correct_buffer = list()
         self.eval_metrics = list()
         # Add tracking for wandb visualizations
@@ -292,7 +55,7 @@ class GSM8kEnv(BaseEnv):
         self.completion_lengths = []
 
     @classmethod
-    def config_init(cls) -> Tuple[BaseEnvConfig, List[APIServerConfig], TrlVllmServer]:
+    def config_init(cls) -> Tuple[BaseEnvConfig, List[APIServerConfig]]:
         env_config = BaseEnvConfig(
             tokenizer_name="Qwen/Qwen3-4B",
             group_size=8,
@@ -310,10 +73,10 @@ class GSM8kEnv(BaseEnv):
                 api_key="x",
                 num_requests_for_eval=256,
                 model_name="Qwen/Qwen3-4B",
+                server_type="trl",
             ),
         ]
-
-        return env_config, server_configs, TrlVllmServer
+        return env_config, server_configs
 
     async def wandb_log(self, wandb_metrics: Optional[Dict] = None):
         if wandb_metrics is None:

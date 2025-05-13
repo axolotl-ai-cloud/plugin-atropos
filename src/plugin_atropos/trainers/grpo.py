@@ -367,9 +367,9 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
         if self.use_vllm:
             # First, have main process load weights if needed
             if self.state.global_step != self._last_loaded_step:
-                LOG.info(f"Loading model weights to vLLM for step {self.state.global_step}")
+                LOG.debug(f"Loading model weights to vLLM for step {self.state.global_step}")
                 self._move_model_to_vllm()
-                LOG.info(f"Model weights loaded to vLLM for step {self.state.global_step}")
+                LOG.debug(f"Model weights loaded to vLLM for step {self.state.global_step}")
                 self._last_loaded_step = self.state.global_step
 
         # Consolidate inputs into single tensors

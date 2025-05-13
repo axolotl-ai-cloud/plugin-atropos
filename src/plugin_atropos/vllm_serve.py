@@ -441,9 +441,9 @@ def main(script_args: ScriptArguments):
         # Check if the server is paused
         if time.time() < app.state.paused_until:
             wait = math.ceil(app.state.paused_until - time.time())
-            print(f"Server is paused. Waiting {wait} seconds...")
+            # print(f"Server is paused. Waiting {wait} seconds...")
             await asyncio.sleep(wait)
-            # raise HTTPException(status_code=503, detail="Server is paused")
+            raise HTTPException(status_code=503, detail="Server is paused")
 
         # Guided decoding, if enabled
         if request.guided_decoding_regex is not None:

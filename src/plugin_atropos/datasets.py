@@ -65,15 +65,15 @@ class RemoteDataProvider:
                         # Fetch data from the API
                         data = self.api_fetch_func()
 
+                        # print(f"data len: {len(data)}")
                         for batch in data:
-                            # print("batch: ")
-                            # print(batch)
+                            # print(f"batch len: {len(batch[0])}")
                             for prompt_ids, prompt_mask, completion_ids, completion_mask, advantages in zip(batch[0], batch[1], batch[2], batch[3], batch[4]):
                             #     sample_id = torch.Tensor([uuid.uuid4().int])
                             #     for input_id, label, score in zip(input_ids, labels, scores):
                             #         row = {"id": sample_id, "input_ids": input_id, "labels": label, "scores": score}
                             #         self.data_queue.put(row, timeout=self.worker_timeout)
-
+                            #     print(prompt_ids.shape)
                                 row = {"prompt_ids": prompt_ids, "prompt_mask": prompt_mask, "completion_ids": completion_ids, "completion_mask": completion_mask, "advantages": advantages}
                                 # print("row: ")
                                 # print(row)
@@ -369,9 +369,9 @@ def get_dataset(cfg, pad_token_id=None):
             res = data.json()
             return res
         except Exception as e:
-            print(e)
-            print(data)
-            print(data.content)
+            # print(e)
+            # print(data)
+            # print(data.content)
             return None
 
     def get_data(
