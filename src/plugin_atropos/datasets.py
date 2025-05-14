@@ -74,6 +74,7 @@ class RemoteDataProvider:
                             #         row = {"id": sample_id, "input_ids": input_id, "labels": label, "scores": score}
                             #         self.data_queue.put(row, timeout=self.worker_timeout)
                             #     print(prompt_ids.shape)
+                            #     print(completion_ids.shape)
                                 row = {"prompt_ids": prompt_ids, "prompt_mask": prompt_mask, "completion_ids": completion_ids, "completion_mask": completion_mask, "advantages": advantages}
                                 # print("row: ")
                                 # print(row)
@@ -215,151 +216,138 @@ class RemoteIterableDataset(IterableDataset):
         """Cleanup when the object is deleted."""
         self.stop()
 
+# Helper function for calculating padded length to a multiple
+def _calculate_padded_length(batch_max_len: int, multiple: int) -> int:
+    if batch_max_len == 0: # If max length is 0, padded length is also 0
+        return 0
+    return math.ceil(batch_max_len / multiple) * multiple
 
 def pad_data_to_good_offset(data, batch_size: int, pad_token_id: int):
-    max_token_len = max(
-        [max([len(x) for x in item["tokens"]]) for item in data["batch"]]
-    )
-    # usually 64 is a good choice to ensure nonweird scaling behavior on GPUS
-    # so we pad to the nearest multiple of 64
     good_multiple = 64
-    if (max_token_len - 1) % good_multiple != 0:
-        max_token_len = math.ceil((max_token_len - 1) / good_multiple) * good_multiple
-        token_setup_len = (
-                max_token_len + 1
-        )  # add 1 so we can make it causal at the proper length
-    else:
-        token_setup_len = max_token_len
-        max_token_len = (
-                max_token_len - 1
-        )  # since it's causal we need to remove the last bit...
-    # pad all tokens to max_token_len and add to lists
-    prompt_ids = list()
-    prompt_mask = list()
-    completion_ids = list()
-    completion_mask = list()
-    advantages = list()
-    for item in data["batch"]:
-        scores = item["scores"]
-        scores = np.array(scores)
-        # check if we have more than 1 score...
+
+    all_prompts_np = []
+    all_completions_np = []
+    all_advantages = []
+
+    # --- Stage 1: Process all items, split into prompts/completions, and collect ---
+    for item_idx, item in enumerate(data["batch"]):
+        # --- Score Processing ---
+        scores = np.array(item["scores"], dtype=np.float32)
         if len(scores) > 1:
-            scores = scores - scores.mean()
-            scores = scores / max(scores.std(), 1e-8)
-        item["scores"] = scores
+            scores_mean = scores.mean()
+            scores_std = scores.std()
+            scores = scores - scores_mean
+            scores = scores / max(scores_std, 1e-8)
+
         if item["overrides"] is not None:
             for i in range(len(item["overrides"])):
-                if item["overrides"][i].get("set_advantage_to_zero", False):
-                    item["scores"][i] = 0
-        # TODO for each of the rows in item["tokens"], find the shared prefix length and lets' split
-        # the token into prompt_ids and completion_ids. We don't need pad the prompt_ids, and we
-        # can pad the completion_ids based on the original combined length
+                if item["overrides"][i].get("set_advantage_to_zero", False) and i < len(scores):
+                    scores[i] = 0.0
+        processed_scores = scores
 
-        # Initialize new keys for prompt_ids and completion_ids
-        item["prompt_ids"] = []
-        item["prompt_mask"] = []
-        item["completion_ids"] = []
-        item["completion_mask"] = []
+        if not item["tokens"]:
+            # If an item has no tokens, but has scores, we might need to handle this.
+            # For now, we assume if no tokens, no corresponding advantages are added.
+            # Or, if scores are per-item, not per-token-sequence, this needs different handling.
+            # Assuming scores correspond to token sequences here.
+            if len(item["tokens"]) != len(processed_scores):
+                print(f"Warning: Item {item_idx} has {len(item['tokens'])} token sequences but {len(processed_scores)} scores. Mismatch.")
+            continue
 
-        # Find the shared prefix length across all rows in item["tokens"]
-        # Get the first row as reference
-        reference_tokens = item["tokens"][0]
-        # Compare with each other row to find shared prefix
-        prefix_lengths = []
-        for i in range(1, len(item["tokens"])):
-            # Find where tokens start to differ
-            min_len = min(len(reference_tokens), len(item["tokens"][i]))
-            shared_len = 0
-            for j in range(min_len):
-                if reference_tokens[j] == item["tokens"][i][j]:
-                    shared_len += 1
-                else:
+        prompt_length = 0
+        if len(item["tokens"]) > 1:
+            reference_tokens = item["tokens"][0]
+            min_shared_len_for_item = len(reference_tokens)
+            for i in range(1, len(item["tokens"])):
+                current_seq_tokens = item["tokens"][i]
+                len_to_compare = min(min_shared_len_for_item, len(current_seq_tokens))
+                current_shared_count = 0
+                for j in range(len_to_compare):
+                    if reference_tokens[j] == current_seq_tokens[j]:
+                        current_shared_count += 1
+                    else:
+                        break
+                min_shared_len_for_item = min(min_shared_len_for_item, current_shared_count)
+                if min_shared_len_for_item == 0:
                     break
-            prefix_lengths.append(shared_len)
-        # Use the minimum shared prefix length as our prompt length
-        prompt_length = min(prefix_lengths) if prefix_lengths else 0
+            prompt_length = min_shared_len_for_item
+        elif len(item["tokens"]) == 1: # Single sequence, prompt_length is 0
+            prompt_length = 0
 
-        # Split tokens into prompt_ids and completion_ids
-        for i in range(len(item["tokens"])):
-            # Split at the determined prompt length
-            prompt = item["tokens"][i][:prompt_length]
-            completion = item["tokens"][i][prompt_length:]
-
-            # Store the split sequences in new keys
-            item["prompt_ids"].append(prompt)
-            item["prompt_mask"].append(np.ones(len(prompt), dtype=np.int32))
-
-            # Pad the completion part as needed
-            completion_pad_len = max(0, token_setup_len - prompt_length - len(completion))
-            padded_completion = np.concatenate([
-                np.array(completion),
-                np.ones(completion_pad_len, dtype=np.int32) * pad_token_id,
-            ])
-            padded_completion_mask = np.concatenate([
-                np.ones(len(completion), dtype=np.int32),
-                np.zeros(completion_pad_len, dtype=np.int32)
-            ])
-
-            item["completion_ids"].append(padded_completion)
-            item["completion_mask"].append(padded_completion_mask)
 
         for i in range(len(item["tokens"])):
-            label_item = np.concatenate(
-                [
-                    np.array(item["prompt_ids"][i]),
-                    np.full(
-                        max(0, len(item["prompt_ids"][i])),
-                        -100,
-                        dtype=np.int32,
-                    ),
-                ]
-            )
-            item["tokens"][i] = np.concatenate(
-                [
-                    np.array(item["tokens"][i]),
-                    np.zeros(
-                        max(0, token_setup_len - len(item["tokens"][i])), dtype=np.int32
-                    ),
-                ]
-            )
-            prompt_ids.append(item["prompt_ids"][i])
-            prompt_mask.append(item["prompt_mask"][i])
-            completion_ids.append(item["completion_ids"][i])
-            completion_mask.append(item["completion_mask"][i])
-            advantages.append(item["scores"][i])
-    # combine all lists into tensors
+            full_token_seq = item["tokens"][i]
+            prompt_part = full_token_seq[:prompt_length]
+            completion_part = full_token_seq[prompt_length:]
+
+            all_prompts_np.append(np.array(prompt_part, dtype=np.int32))
+            all_completions_np.append(np.array(completion_part, dtype=np.int32))
+            if i < len(processed_scores):
+                all_advantages.append(processed_scores[i])
+            else:
+                # This case should ideally not happen if scores align with tokens. Add a default if it does.
+                all_advantages.append(0.0)
+                print(f"Warning: Missing score for token sequence {i} in item {item_idx}. Appending 0.0 advantage.")
+
+
+    # --- Stage 2: Determine global max lengths for padding ---
+    if not all_prompts_np: # No data to process
+        return [], [], [], [], []
+
+    global_actual_max_prompt_len = max(len(p) for p in all_prompts_np) if all_prompts_np else 0
+    global_padded_prompt_target_len = _calculate_padded_length(global_actual_max_prompt_len, good_multiple)
+
+    global_actual_max_completion_len = max(len(c) for c in all_completions_np) if all_completions_np else 0
+    global_padded_completion_target_len = _calculate_padded_length(global_actual_max_completion_len, good_multiple)
+
+    # --- Stage 3: Batching and Padding to global target lengths ---
     prompt_ids_batches = []
     prompt_mask_batches = []
     completion_ids_batches = []
     completion_mask_batches = []
     advantages_batches = []
 
-    for i in range(len(prompt_ids) // batch_size):
-        prompt_ids_batches.append(
-            torch.tensor(
-                np.stack(prompt_ids[i * batch_size : (i + 1) * batch_size], axis=0)
-            )
-        )
-        prompt_mask_batches.append(
-            torch.tensor(
-                np.stack(prompt_mask[i * batch_size : (i + 1) * batch_size], axis=0)
-            )
-        )
-        completion_ids_batches.append(
-            torch.tensor(
-                np.stack(completion_ids[i * batch_size : (i + 1) * batch_size], axis=0)
-            )
-        )
-        completion_mask_batches.append(
-            torch.tensor(
-                np.stack(completion_mask[i * batch_size : (i + 1) * batch_size], axis=0)
-            )
-        )
-        advantages_batches.append(
-            torch.tensor(
-                np.stack(advantages[i * batch_size : (i + 1) * batch_size], axis=0)
-            ).view(-1, 1)
-        )
+    num_samples = len(all_prompts_np)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+
+    for i in range(0, num_samples, batch_size): # Iterate to form batches
+        start_idx = i
+        end_idx = min(i + batch_size, num_samples) # Handle last batch potentially being smaller
+
+        if start_idx == end_idx: # Should not happen if num_samples > 0
+            continue
+
+        current_batch_prompts_np = all_prompts_np[start_idx:end_idx]
+        current_batch_completions_np = all_completions_np[start_idx:end_idx]
+        current_batch_advantages = np.array(all_advantages[start_idx:end_idx], dtype=np.float32)
+
+        batch_padded_prompts_list = []
+        batch_prompt_masks_list = []
+        for prompt_arr in current_batch_prompts_np:
+            pad_len = max(0, global_padded_prompt_target_len - len(prompt_arr))
+            padded_p = np.concatenate([prompt_arr, np.full(pad_len, pad_token_id, dtype=np.int32)])
+            mask_p = np.concatenate([np.ones(len(prompt_arr), dtype=np.int32), np.zeros(pad_len, dtype=np.int32)])
+            batch_padded_prompts_list.append(padded_p)
+            batch_prompt_masks_list.append(mask_p)
+
+        prompt_ids_batches.append(torch.tensor(np.stack(batch_padded_prompts_list), dtype=torch.long))
+        prompt_mask_batches.append(torch.tensor(np.stack(batch_prompt_masks_list), dtype=torch.long))
+
+        batch_padded_completions_list = []
+        batch_completion_masks_list = []
+        for comp_arr in current_batch_completions_np:
+            pad_len = max(0, global_padded_completion_target_len - len(comp_arr))
+            padded_c = np.concatenate([comp_arr, np.full(pad_len, pad_token_id, dtype=np.int32)])
+            mask_c = np.concatenate([np.ones(len(comp_arr), dtype=np.int32), np.zeros(pad_len, dtype=np.int32)])
+            batch_padded_completions_list.append(padded_c)
+            batch_completion_masks_list.append(mask_c)
+
+        completion_ids_batches.append(torch.tensor(np.stack(batch_padded_completions_list), dtype=torch.long))
+        completion_mask_batches.append(torch.tensor(np.stack(batch_completion_masks_list), dtype=torch.long))
+
+        advantages_batches.append(torch.tensor(current_batch_advantages, dtype=torch.float32).view(-1, 1))
+
     return prompt_ids_batches, prompt_mask_batches, completion_ids_batches, completion_mask_batches, advantages_batches
 
 def get_dataset(cfg, pad_token_id=None):
