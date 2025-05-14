@@ -493,8 +493,6 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
         unwrapped_model = self.accelerator.unwrap_model(model)
         if is_peft_model(unwrapped_model):
             unwrapped_model = unwrapped_model.base_model.model
-        if hasattr(unwrapped_model, "base_model"):
-            unwrapped_model = unwrapped_model.base_model.model
         last_hidden_state = unwrapped_model.model(
             input_ids=input_ids, attention_mask=attention_mask
         ).last_hidden_state[:, :-1, :]  # (B, L-1, H)
