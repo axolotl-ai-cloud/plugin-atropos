@@ -48,4 +48,4 @@ CUDA_VISIBLE_DEVICES=2 axolotl train examples/train-fft.yaml
 
 # Errata
 
-- LoRA and QLoRA currently unupported.
+- LoRA and QLoRA with kl beta != 0.0 is currently unsupported.

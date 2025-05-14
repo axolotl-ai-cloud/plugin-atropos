@@ -81,7 +81,8 @@ class RemoteDataProvider:
 
                     except Exception as e:
                         # Log or handle API fetch errors appropriately
-                        print(f"API fetch error: {e}")
+                        if "object is not subscriptable" not in str(e):
+                            print(f"API fetch error: {e}")
                         time.sleep(self.fetch_delay)
                         continue
 

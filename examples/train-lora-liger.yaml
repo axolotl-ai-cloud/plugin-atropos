@@ -1,8 +1,21 @@
 base_model: Qwen/Qwen3-4B
 
-torch_compile: true
+# torch_compile: true
 rl: grpo
-learning_rate: 1e-5
+learning_rate: 1e-4
+adapter: lora
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.0
+lora_target_linear: true
+lora_modules_to_save:
+  - embed_tokens
+  - lm_head
+
+# lora_qkv_kernel: true
+# lora_o_kernel: true
+# lora_mlp_kernel: true
+
 optimizer: adamw_torch_fused
 vllm:
   host: "0.0.0.0"
@@ -15,7 +28,7 @@ trl:
   beta: 0.0
   num_generations: 8
   max_completion_length: 2048
-  use_liger_loss: true
+  use_liger_loss: true  # liger not supported with PEFT
   use_vllm: true
   vllm_server_port: 9001
 
@@ -24,7 +37,7 @@ accelerator_config:
 
 output_dir: /workspace/data/axolotl-artifacts/atropos-example
 micro_batch_size: 8
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 gradient_checkpointing: "offload"
 #gradient_checkpointing_kwargs:
 #  use_reentrant: false
@@ -39,7 +52,7 @@ plugins:
 
 logging_steps: 1
 warmup_steps: 5
-max_steps: 20
+max_steps: 10
 save_steps: 5
 
 wandb_project: atropos-plugin-example
