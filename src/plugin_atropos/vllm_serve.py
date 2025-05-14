@@ -571,7 +571,6 @@ def main(script_args: ScriptArguments):
                 name=task_name
             )
             tasks.append(task)
-            # No need to add_done_callback here as logging is inside _send_update_to_worker_conn
 
         return {"message": "Request received, updating named parameter"}
 
