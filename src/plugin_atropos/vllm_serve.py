@@ -443,7 +443,7 @@ def main(script_args: ScriptArguments):
             wait = math.ceil(app.state.paused_until - time.time())
             # print(f"Server is paused. Waiting {wait} seconds...")
             await asyncio.sleep(wait)
-            raise HTTPException(status_code=503, detail="Server is paused")
+            # raise HTTPException(status_code=503, detail="Server is paused")
 
         # Guided decoding, if enabled
         if request.guided_decoding_regex is not None:
@@ -540,9 +540,37 @@ def main(script_args: ScriptArguments):
         app.state.paused_until = time.time() + 1.0
 
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
-        kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
-        for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+
+        kwargs_for_collective_rpc = {
+            "method": "update_named_param",
+            "args": (request.name, dtype, tuple(request.shape))
+        }
+        message_to_worker = {
+            "type": "fire_and_forget",
+            "method": "collective_rpc",
+            "kwargs": kwargs_for_collective_rpc
+        }
+
+        current_loop = asyncio.get_running_loop()
+        tasks = []
+
+        # Define an async helper function to send message using run_in_executor
+        # This ensures the synchronous `conn.send()` doesn't block the event loop.
+        async def _send_update_to_worker_conn(conn: Connection, msg: dict, worker_idx: int):
+            try:
+                await current_loop.run_in_executor(None, conn.send, msg)
+            except Exception as e:
+                logger.error(f"Task send_update_to_dp_worker_{worker_idx}: Failed to dispatch message: {e}", exc_info=True)
+                # Note: This error occurs in the background. The HTTP response is already sent.
+
+        for i, connection_to_worker in enumerate(connections):
+            task_name = f"send_update_to_dp_worker_{i}"
+            # Create an asyncio task for each send operation
+            task = asyncio.create_task(
+                _send_update_to_worker_conn(connection_to_worker, message_to_worker, i),
+                name=task_name
+            )
+            tasks.append(task)
 
         return {"message": "Request received, updating named parameter"}
 
