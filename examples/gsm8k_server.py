@@ -66,6 +66,7 @@ class GSM8kEnv(BaseEnv):
             steps_per_eval=100,
             max_token_length=2048,
             wandb_name="gsm8k",
+            max_batches_offpolicy=5,
         )
         server_configs = [
             APIServerConfig(

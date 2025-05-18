@@ -335,7 +335,8 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
                 else:
                     self.reward_funcs[i] = self.accelerator.prepare_model(reward_func, evaluation_mode=True)
 
-        self._last_loaded_step = 0  # no need to reload model weights again before training
+        self.update_vllm_after_training_step = True
+        self._last_loaded_step = -1 if self.update_vllm_after_training_step else 0 # no need to reload model weights again before training
 
     def get_train_dataloader(self):
         if self.train_dataset is None:
@@ -368,7 +369,7 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
     ) -> dict[str, Union[torch.Tensor, Any]]:
         mode = "eval" if self.control.should_evaluate else "train"
 
-        if self.use_vllm:
+        if self.use_vllm and not self.update_vllm_after_training_step:
             # First, have main process load weights if needed
             if self.state.global_step != self._last_loaded_step:
                 LOG.debug(f"Loading model weights to vLLM for step {self.state.global_step}")
@@ -463,8 +464,19 @@ class AtroposGRPOTrainer(SchedulerMixin, GRPOTrainer):
         return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
 
     def _get_train_sampler(self) -> Sampler:
-        # just return a SequentialSampler
-        return torch.utils.data.SequentialSampler(self.train_dataset)
+        return None
+
+    def training_step(self, *args, **kwargs):
+        loss = super().training_step(*args, **kwargs)
+        if self.update_vllm_after_training_step and self.use_vllm:
+            # prefer to move to vllm asap rather than waiting for more training data
+            # First, have main process load weights if needed
+            if self.state.global_step != self._last_loaded_step:
+                LOG.debug(f"Loading model weights to vLLM for step {self.state.global_step}")
+                self._move_model_to_vllm()
+                LOG.debug(f"Model weights loaded to vLLM for step {self.state.global_step}")
+                self._last_loaded_step = self.state.global_step
+        return loss
 
     def _compute_loss(self, model, inputs):
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
