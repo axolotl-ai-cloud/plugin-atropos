@@ -1,3 +1,4 @@
+import logging
 import math
 import queue
 import threading
@@ -10,8 +11,9 @@ import torch
 from datasets import IterableDataset
 import requests
 from datasets.iterable_dataset import ExamplesIterable
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, wait_exponential
 
+LOG = logging.getLogger(__name__)
 
 class RemoteDataProvider:
     """
@@ -59,15 +61,19 @@ class RemoteDataProvider:
             try:
                 # Check if we need to fetch more data
                 if self.data_queue.qsize() < self.queue_threshold:
-                    # print(f"Fetching data from API... q: {self.data_queue.qsize()}/{self.max_queue_size}")
+                    # LOG.debug(f"Fetching data from API... q: {self.data_queue.qsize()}/{self.max_queue_size}")
                     # print(f"queue_threshold: {self.queue_threshold}")
                     try:
                         # Fetch data from the API
                         data = self.api_fetch_func()
+                        if not data:
+                            # no data to fetch yet
+                            time.sleep(self.fetch_delay)
+                            continue
 
-                        # print(f"data len: {len(data)}")
+                        # LOG.debug(f"data len: {len(data)}")
                         for batch in data:
-                            # print(f"batch len: {len(batch[0])}")
+                            # LOG.debug(f"batch len: {len(batch[0])}")
                             for prompt_ids, prompt_mask, completion_ids, completion_mask, advantages in zip(batch[0], batch[1], batch[2], batch[3], batch[4]):
                             #     sample_id = torch.Tensor([uuid.uuid4().int])
                             #     for input_id, label, score in zip(input_ids, labels, scores):
@@ -120,7 +126,8 @@ class RemoteDataProvider:
             try:
                 # Attempt to get data from the queue with blocking up to the TTL
                 data = self.data_queue.get(timeout=self.ttl)
-                # print("received data from queue: ", data)
+                print("received data from queue: ", data)
+                print("queue size: ", self.data_queue.qsize())
 
                 # Yield as (key, example) tuple
                 # If data is a dict, use as-is; otherwise, wrap it
@@ -157,63 +164,6 @@ class RemoteDataProvider:
         """
         Cleanup method to ensure the worker thread is stopped properly.
         """
-        self.stop()
-
-
-class RemoteIterableDataset(IterableDataset):
-    """
-    Wrapper class that creates a PyTorch IterableDataset from a remote API data source.
-    Compatible with HuggingFace datasets library.
-    """
-    def __init__(
-            self,
-            api_fetch_func: Callable,
-            queue_threshold: int = 10,
-            max_queue_size: int = 50,
-            ttl: Optional[float] = None,
-            fetch_delay: float = 0.1,
-            worker_timeout: float = 1.0,
-    ):
-        """
-        Args:
-            api_fetch_func: Callable that returns data from the API
-            queue_threshold: Minimum queue size before fetching more data
-            max_queue_size: Maximum queue size to prevent unbounded growth
-            ttl: Time-to-live for blocking on the queue when getting data
-            fetch_delay: Delay between API fetch attempts in the worker
-            worker_timeout: Timeout for worker thread operations
-        """
-        # Create the data provider
-        self.data_provider = RemoteDataProvider(
-            api_fetch_func=api_fetch_func,
-            queue_threshold=queue_threshold,
-            max_queue_size=max_queue_size,
-            ttl=ttl,
-            fetch_delay=fetch_delay,
-            worker_timeout=worker_timeout,
-        )
-
-        # Create the ExamplesIterable with the generate_examples_fn
-        examples_iterable = ExamplesIterable(
-            self.data_provider.generate_examples_fn, {},
-        )
-
-        super().__init__(self, examples_iterable)
-
-    def stop(self):
-        """Stop the worker thread and iteration."""
-        self.data_provider.stop()
-
-    def __iter__(self):
-        """Forward iteration to the underlying dataset."""
-        return iter(self.dataset)
-
-    def __next__(self):
-        """Forward next() call to the underlying dataset."""
-        return next(iter(self.dataset))
-
-    def __del__(self):
-        """Cleanup when the object is deleted."""
         self.stop()
 
 # Helper function for calculating padded length to a multiple
@@ -351,7 +301,7 @@ def pad_data_to_good_offset(data, batch_size: int, pad_token_id: int):
     return prompt_ids_batches, prompt_mask_batches, completion_ids_batches, completion_mask_batches, advantages_batches
 
 def get_dataset(cfg, pad_token_id=None):
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=15))
+    @retry(wait=wait_exponential(multiplier=1, min=4, max=15))
     def get_batch():
         data = requests.get(f"{cfg.atropos_server_host}:{cfg.atropos_server_port}/batch", timeout=10)
         try:
@@ -384,8 +334,8 @@ def get_dataset(cfg, pad_token_id=None):
 
     data_provider = RemoteDataProvider(
         api_fetch_func=partial(get_data, cfg.trl.num_generations, cfg.sequence_len),
-        queue_threshold=5,
-        max_queue_size=cfg.trl.num_generations * cfg.micro_batch_size * cfg.gradient_accumulation_steps * 20,
+        queue_threshold=cfg.world_size * cfg.micro_batch_size * cfg.gradient_accumulation_steps * 3,
+        max_queue_size=cfg.world_size * cfg.trl.num_generations * cfg.micro_batch_size * cfg.gradient_accumulation_steps * 10,
         ttl=1.0,
         fetch_delay=0.5,
         pad_token_id=pad_token_id,
