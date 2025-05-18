@@ -443,7 +443,7 @@ def main(script_args: ScriptArguments):
             wait = math.ceil(app.state.paused_until - time.time())
             # print(f"Server is paused. Waiting {wait} seconds...")
             await asyncio.sleep(wait)
-            # raise HTTPException(status_code=503, detail="Server is paused")
+            raise HTTPException(status_code=503, detail="Server is paused")
 
         # Guided decoding, if enabled
         if request.guided_decoding_regex is not None:
@@ -537,7 +537,7 @@ def main(script_args: ScriptArguments):
         # So with collective_rpc we need to call it this way:
         # llm.collective_rpc("update_named_param", args=("name", torch.float32, (10, 10)))
 
-        app.state.paused_until = time.time() + 1.0
+        app.state.paused_until = time.time() + 2.0
 
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
 

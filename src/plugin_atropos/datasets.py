@@ -126,8 +126,9 @@ class RemoteDataProvider:
             try:
                 # Attempt to get data from the queue with blocking up to the TTL
                 data = self.data_queue.get(timeout=self.ttl)
-                # LOG.debug("received data from queue: ", data)
-                # LOG.debug("queue size: ", self.data_queue.qsize())
+                # LOG.debug("received data from queue: ")
+                # LOG.debug(data)
+                # LOG.debug("queue size: " + str(self.data_queue.qsize()))
 
                 # Yield as (key, example) tuple
                 # If data is a dict, use as-is; otherwise, wrap it
