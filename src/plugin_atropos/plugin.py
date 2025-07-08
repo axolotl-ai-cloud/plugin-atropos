@@ -4,7 +4,7 @@ import requests
 from axolotl.integrations.base import BasePlugin
 from axolotl.utils.dict import DictDefault
 from axolotl.utils.distributed import is_local_main_process
-from axolotl.utils.models import load_tokenizer
+from axolotl.loaders import load_tokenizer
 from datasets import load_dataset
 
 from .datasets import get_dataset
